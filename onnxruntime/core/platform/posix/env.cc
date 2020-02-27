@@ -331,12 +331,10 @@ class PosixEnv : public Env {
 
 }  // namespace
 
-#if defined(PLATFORM_POSIX) || defined(__ANDROID__)
 // REGISTER_FILE_SYSTEM("", PosixFileSystem);
 // REGISTER_FILE_SYSTEM("file", LocalPosixFileSystem);
 const Env& Env::Default() {
   return PosixEnv::Instance();
 }
-#endif
 
 }  // namespace onnxruntime

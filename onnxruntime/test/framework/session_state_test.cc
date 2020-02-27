@@ -18,8 +18,9 @@
 
 using namespace ONNX_NAMESPACE;
 using namespace std;
-
 namespace onnxruntime {
+using concurrency::ThreadOptions;
+
 namespace test {
 class TestOpKernel : public OpKernel {
  public:
@@ -36,7 +37,7 @@ class TestOpKernel : public OpKernel {
 };
 
 TEST(SessionStateTest, AddGetKernelTest) {
-  concurrency::ThreadPool tp{"test", 1};
+  concurrency::ThreadPool tp(&onnxruntime::Env::Default(), ThreadOptions(),"", 1, true);
   ONNX_OPERATOR_SCHEMA(Variable)
       .SetDoc("Input variable.")
       .Output(0, "output_1", "docstr for output_1.", "tensor(int32)");
@@ -93,7 +94,7 @@ class SessionStateTestP : public testing::TestWithParam<TestParam> {};
 // Test that we separate out constant and non-constant initializers correctly
 TEST_P(SessionStateTestP, TestInitializerProcessing) {
   const TestParam& param = GetParam();
-  concurrency::ThreadPool tp{"test", 1};
+  concurrency::ThreadPool tp(&onnxruntime::Env::Default(), ThreadOptions(),"", 2, true);
 
   std::basic_ostringstream<ORTCHAR_T> oss;
   oss << ORT_TSTR("testdata/optional_inputs_ir") << param.ir_version << ORT_TSTR(".onnx");

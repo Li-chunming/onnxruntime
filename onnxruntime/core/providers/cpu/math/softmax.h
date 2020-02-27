@@ -71,7 +71,7 @@ class Softmax final : public OpKernel {
       ComputeSoftMax<use_log>(Eigen::DefaultDevice(), X_tensor, Y_tensor, N, D);
 #ifndef USE_OPENMP
     else
-      ComputeSoftMax<use_log>(Eigen::ThreadPoolDevice(&tp->GetHandler(), tp->NumThreads()), X_tensor, Y_tensor, N, D);
+      ComputeSoftMax<use_log>(tp->device(), X_tensor, Y_tensor, N, D);
 #endif
     return Status::OK();
   }

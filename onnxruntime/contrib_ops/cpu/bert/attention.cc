@@ -236,7 +236,7 @@ Status Attention<T>::Compute(OpKernelContext* context) const {
     const int N = batch_size * num_heads_ * sequence_length;
     const int D = sequence_length;
 
-    concurrency::ThreadPool::TryBatchParallelFor(context->GetOperatorThreadPool(), N, [&](int j) {
+    concurrency::ThreadPool::TryBatchParallelFor(context->GetOperatorThreadPool(), N, [&](ptrdiff_t j) {
       float* x = reinterpret_cast<T*>(scratch_data) + j * D;
       float* y = x;
 

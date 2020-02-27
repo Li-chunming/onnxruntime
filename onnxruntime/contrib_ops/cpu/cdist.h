@@ -83,8 +83,7 @@ void cdist(const T* a, const T* b, T* dest, size_t ma, size_t mb, size_t n, conc
     return cdist_single_threaded<T, ElemFunc>(a, b, dest, ma, mb, n);
 #ifndef USE_OPENMP
   }
-  Eigen::ThreadPoolDevice device(&tp->GetHandler(), tp->NumThreads());
-  device.parallelFor(ma * mb, Eigen::TensorOpCost(0, 0, static_cast<double>(3 * n)),
+  tp->ParallelFor(ma * mb, static_cast<double>(3 * n),
                      CDistOneBlock<T, ElemFunc>(a, b, dest, mb, n));
 #endif
 }

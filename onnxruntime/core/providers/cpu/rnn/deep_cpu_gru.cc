@@ -1,6 +1,5 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-#include "core/platform/threadpool.h"
 #include "core/framework/op_kernel_context_internal.h"
 
 // there's no way to use a raw pointer as the copy destination with std::copy_n
@@ -22,6 +21,7 @@
 #include "core/framework/tensor.h"
 
 #include "core/platform/ort_mutex.h"
+#include "core/platform/threadpool.h"
 
 #ifdef _MSC_VER
 #pragma warning(pop)

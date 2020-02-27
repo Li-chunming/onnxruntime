@@ -63,7 +63,7 @@ class Env {
   /// implementation instead of relying on this default environment.
   ///
   /// The result of Default() belongs to this library and must never be deleted.
-  static const Env& Default();
+  static Env& Default();
 
   virtual int GetNumCpuCores() const = 0;
 

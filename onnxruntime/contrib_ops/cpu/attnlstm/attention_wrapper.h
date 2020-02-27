@@ -8,6 +8,7 @@
 #include "core/common/common.h"
 #include "core/common/logging/logging.h"
 #include "core/framework/allocator.h"
+#include "core/graph/onnx_protobuf.h"
 #include "core/platform/threadpool.h"
 
 namespace onnxruntime {

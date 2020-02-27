@@ -276,10 +276,8 @@ class WindowsEnv : public Env {
 };
 }  // namespace
 
-#if defined(PLATFORM_WINDOWS)
-const Env& Env::Default() {
+Env& Env::Default() {
   return WindowsEnv::Instance();
 }
-#endif
 
 }  // namespace onnxruntime

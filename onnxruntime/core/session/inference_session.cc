@@ -54,6 +54,7 @@
 #include "core/util/thread_utils.h"
 #include "core/session/inference_session_utils.h"
 #include "core/platform/ort_mutex.h"
+#include "core/platform/EigenNonBlockingThreadPool.h"
 
 using namespace ONNX_NAMESPACE;
 
@@ -116,8 +117,8 @@ static Status FinalizeSessionOptions(const SessionOptions& user_provided_session
     if (load_config_from_model_env_var_value.length() > 1 ||
         (load_config_from_model_env_var_value[0] != '0' && load_config_from_model_env_var_value[0] != '1')) {
       std::ostringstream oss;
-      oss << "The only supported values for the environment variable " << inference_session_utils::kOrtLoadConfigFromModelEnvVar
-          << " are '0' and '1'. "
+      oss << "The only supported values for the environment variable "
+          << inference_session_utils::kOrtLoadConfigFromModelEnvVar << " are '0' and '1'. "
           << "The environment variable contained the value: " << load_config_from_model_env_var_value;
       return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT, oss.str());
     }
@@ -162,26 +163,26 @@ static Status FinalizeSessionOptions(const SessionOptions& user_provided_session
 void InferenceSession::ConstructorCommon(const SessionOptions& session_options,
                                          logging::LoggingManager* logging_manager) {
   auto status = FinalizeSessionOptions(session_options, model_proto_.get(), session_options_);
-  ORT_ENFORCE(status.IsOK(), "Could not finalize session options while constructing the inference session. Error Message: ",
+  ORT_ENFORCE(status.IsOK(),
+              "Could not finalize session options while constructing the inference session. Error Message: ",
               status.ErrorMessage());
 
-  graph_transformation_mgr_ = onnxruntime::make_unique<GraphTransformerManager>(
-      session_options_.max_num_graph_transformation_steps);
+  graph_transformation_mgr_ =
+      onnxruntime::make_unique<GraphTransformerManager>(session_options_.max_num_graph_transformation_steps);
   logging_manager_ = logging_manager;
+  concurrency::ThreadOptions to;
+  thread_pool_ = concurrency::CreateThreadPool(session_options_.intra_op_num_threads, const_cast<Env*>(&Env::Default()),
+                                               to, "intra_op", session_options_.thread_pool_allow_spinning, nullptr);
 
-  thread_pool_ = concurrency::CreateThreadPool("intra_op_thread_pool",
-                                               session_options_.intra_op_num_threads);
+  inter_op_thread_pool_ = session_options_.execution_mode == ExecutionMode::ORT_PARALLEL ?
+          concurrency::CreateThreadPool(session_options_.inter_op_num_threads, const_cast<Env*>(&Env::Default()), to,
+                                        "intra_op", session_options_.thread_pool_allow_spinning, nullptr) :
+                              nullptr;
 
-  inter_op_thread_pool_ = session_options_.execution_mode == ExecutionMode::ORT_PARALLEL
-                              ? concurrency::CreateThreadPool("inter_op_thread_pool",
-                                                              session_options_.inter_op_num_threads)
-                              : nullptr;
-
-  session_state_ = onnxruntime::make_unique<SessionState>(execution_providers_,
-                                                          session_options_.enable_mem_pattern &&
-                                                              session_options_.execution_mode == ExecutionMode::ORT_SEQUENTIAL,
-                                                          thread_pool_.get(),
-                                                          inter_op_thread_pool_.get());
+  session_state_ = onnxruntime::make_unique<SessionState>(
+      execution_providers_,
+      session_options_.enable_mem_pattern && session_options_.execution_mode == ExecutionMode::ORT_SEQUENTIAL,
+      thread_pool_.get(), inter_op_thread_pool_.get());
 
   InitLogger(logging_manager);
 
@@ -197,15 +198,13 @@ void InferenceSession::ConstructorCommon(const SessionOptions& session_options,
   session_id_ = global_session_id_.fetch_add(1);
 }
 
-InferenceSession::InferenceSession(const SessionOptions& session_options,
-                                   logging::LoggingManager* logging_manager)
+InferenceSession::InferenceSession(const SessionOptions& session_options, logging::LoggingManager* logging_manager)
     : insert_cast_transformer_("CastFloat16Transformer") {
   // Initialize assets of this session instance
   ConstructorCommon(session_options, logging_manager);
 }
 
-InferenceSession::InferenceSession(const SessionOptions& session_options,
-                                   const std::string& model_uri,
+InferenceSession::InferenceSession(const SessionOptions& session_options, const std::string& model_uri,
                                    logging::LoggingManager* logging_manager)
     : insert_cast_transformer_("CastFloat16Transformer") {
   model_location_ = ToWideString(model_uri);
@@ -219,8 +218,7 @@ InferenceSession::InferenceSession(const SessionOptions& session_options,
 }
 
 #ifdef _WIN32
-InferenceSession::InferenceSession(const SessionOptions& session_options,
-                                   const std::wstring& model_uri,
+InferenceSession::InferenceSession(const SessionOptions& session_options, const std::wstring& model_uri,
                                    logging::LoggingManager* logging_manager)
     : insert_cast_transformer_("CastFloat16Transformer") {
   model_location_ = ToWideString(model_uri);
@@ -234,8 +232,7 @@ InferenceSession::InferenceSession(const SessionOptions& session_options,
 }
 #endif
 
-InferenceSession::InferenceSession(const SessionOptions& session_options,
-                                   std::istream& model_istream,
+InferenceSession::InferenceSession(const SessionOptions& session_options, std::istream& model_istream,
                                    logging::LoggingManager* logging_manager)
     : insert_cast_transformer_("CastFloat16Transformer") {
   google::protobuf::io::IstreamInputStream zero_copy_input(&model_istream);
@@ -247,9 +244,7 @@ InferenceSession::InferenceSession(const SessionOptions& session_options,
   ConstructorCommon(session_options, logging_manager);
 }
 
-InferenceSession::InferenceSession(const SessionOptions& session_options,
-                                   const void* model_data,
-                                   int model_data_len,
+InferenceSession::InferenceSession(const SessionOptions& session_options, const void* model_data, int model_data_len,
                                    logging::LoggingManager* logging_manager)
     : insert_cast_transformer_("CastFloat16Transformer") {
   model_proto_ = onnxruntime::make_unique<ONNX_NAMESPACE::ModelProto>();
@@ -276,7 +271,8 @@ InferenceSession::~InferenceSession() {
     }
   }
 #ifdef ONNXRUNTIME_ENABLE_INSTRUMENT
-  if (session_activity_started_) TraceLoggingWriteStop(session_activity, "OrtInferenceSessionActivity");
+  if (session_activity_started_)
+    TraceLoggingWriteStop(session_activity, "OrtInferenceSessionActivity");
 #endif
 }
 
@@ -290,10 +286,12 @@ common::Status InferenceSession::RegisterExecutionProvider(std::unique_ptr<IExec
   // DML's memory is not byte addressable and hence mem pattern doesn't work.
   if (provider_type == onnxruntime::kDmlExecutionProvider) {
     if (session_options_.enable_mem_pattern) {
-      return Status(ONNXRUNTIME, INVALID_ARGUMENT, "Memory pattern must be disabled before registering DMLExecutionProvider");
+      return Status(ONNXRUNTIME, INVALID_ARGUMENT,
+                    "Memory pattern must be disabled before registering DMLExecutionProvider");
     }
     if (session_options_.execution_mode != ExecutionMode::ORT_SEQUENTIAL) {
-      return Status(ONNXRUNTIME, INVALID_ARGUMENT, "Sequential execution must be enabled before registering DMLExecutionProvider");
+      return Status(ONNXRUNTIME, INVALID_ARGUMENT,
+                    "Sequential execution must be enabled before registering DMLExecutionProvider");
     }
   }
 
@@ -503,8 +501,8 @@ common::Status InferenceSession::Load(std::istream& model_istream) {
       AddCustomOpDomains({domain.get()});
     }
 #endif
-    return onnxruntime::Model::Load(std::move(model_proto), model, HasLocalSchema() ? &custom_schema_registries_ : nullptr,
-                                    *session_logger_);
+    return onnxruntime::Model::Load(std::move(model_proto), model,
+                                    HasLocalSchema() ? &custom_schema_registries_ : nullptr, *session_logger_);
   };
 
   return Load(loader, "model_loading_istream");
@@ -532,8 +530,8 @@ common::Status InferenceSession::Load(const void* model_data, int model_data_len
     }
 #endif
 
-    return onnxruntime::Model::Load(std::move(model_proto), model, HasLocalSchema() ? &custom_schema_registries_ : nullptr,
-                                    *session_logger_);
+    return onnxruntime::Model::Load(std::move(model_proto), model,
+                                    HasLocalSchema() ? &custom_schema_registries_ : nullptr, *session_logger_);
   };
 
   return Load(loader, "model_loading_array");
@@ -548,7 +546,8 @@ common::Status InferenceSession::Load() {
 
   auto loader = [this](std::shared_ptr<onnxruntime::Model>& model) {
 #ifdef ENABLE_LANGUAGE_INTEROP_OPS
-    LoadInterOp(*this->model_proto_, interop_domains_, [&](const char* msg) { LOGS(*session_logger_, WARNING) << msg; });
+    LoadInterOp(*this->model_proto_, interop_domains_,
+                [&](const char* msg) { LOGS(*session_logger_, WARNING) << msg; });
     for (const auto& domain : interop_domains_) {
       AddCustomOpDomains({domain.get()});
     }
@@ -575,7 +574,8 @@ common::Status InferenceSession::TransformGraph(onnxruntime::Graph& graph,
   // 5. insert cast nodes.
 
   // first apply global(execution provider independent),  level 1(default/system/basic) graph to graph optimizations
-  ORT_RETURN_IF_ERROR_SESSIONID_(graph_transformer_mgr.ApplyTransformers(graph, TransformerLevel::Level1, *session_logger_));
+  ORT_RETURN_IF_ERROR_SESSIONID_(
+      graph_transformer_mgr.ApplyTransformers(graph, TransformerLevel::Level1, *session_logger_));
 
 #ifdef USE_DML
   // TODO: this is a temporary workaround to apply the DML EP's custom graph transformer prior to partitioning. This
@@ -586,7 +586,8 @@ common::Status InferenceSession::TransformGraph(onnxruntime::Graph& graph,
   // To prevent this from interfering with other EPs, we only apply this transform if the DML EP is the only one that's
   // registered (aside from the CPU EP, which is always registered by default.)
   if (execution_providers_.Get(kDmlExecutionProvider) && execution_providers_.NumProviders() <= 2) {
-    Dml::GraphTransformer dml_transformer(onnxruntime::kDmlExecutionProvider, execution_providers_.Get(kDmlExecutionProvider));
+    Dml::GraphTransformer dml_transformer(onnxruntime::kDmlExecutionProvider,
+                                          execution_providers_.Get(kDmlExecutionProvider));
 
     bool modified = false;
     dml_transformer.Apply(graph, modified, *session_logger_);
@@ -595,12 +596,14 @@ common::Status InferenceSession::TransformGraph(onnxruntime::Graph& graph,
 
   // Do partitioning based on execution providers' capability.
   GraphPartitioner partitioner(kernel_registry_manager, providers);
-  ORT_RETURN_IF_ERROR_SESSIONID_(partitioner.Partition(graph, session_state.ExportDll(), session_state.GetMutableFuncMgr()));
+  ORT_RETURN_IF_ERROR_SESSIONID_(
+      partitioner.Partition(graph, session_state.ExportDll(), session_state.GetMutableFuncMgr()));
 
   // apply transformers except default transformers
   // Default transformers are required for correctness and they are owned and run by inference session
   for (int i = static_cast<int>(TransformerLevel::Level1); i <= static_cast<int>(TransformerLevel::MaxLevel); i++) {
-    ORT_RETURN_IF_ERROR_SESSIONID_(graph_transformer_mgr.ApplyTransformers(graph, static_cast<TransformerLevel>(i), *session_logger_));
+    ORT_RETURN_IF_ERROR_SESSIONID_(
+        graph_transformer_mgr.ApplyTransformers(graph, static_cast<TransformerLevel>(i), *session_logger_));
   }
 
   bool modified = false;
@@ -615,7 +618,8 @@ common::Status InferenceSession::TransformGraph(onnxruntime::Graph& graph,
     if (node_provider.empty()) {
       std::ostringstream oss;
       oss << "Could not find an implementation for the node ";
-      if (!node.Name().empty()) oss << node.Name() << ":";
+      if (!node.Name().empty())
+        oss << node.Name() << ":";
       oss << node.OpType();
       if (node.Op()) {
         oss << "(" << node.Op()->since_version() << ")";
@@ -668,10 +672,9 @@ common::Status InferenceSession::CreateSubgraphSessionState(Graph& graph, Sessio
       Graph* subgraph = entry.second;
       ORT_ENFORCE(subgraph, "Main Graph instance should have populated all subgraphs when being resolved.");
 
-      auto subgraph_session_state = onnxruntime::make_unique<SessionState>(execution_providers_,
-                                                                           session_state.GetEnableMemoryPattern(),
-                                                                           session_state.GetThreadPool(),
-                                                                           session_state.GetInterOpThreadPool());
+      auto subgraph_session_state =
+          onnxruntime::make_unique<SessionState>(execution_providers_, session_state.GetEnableMemoryPattern(),
+                                                 session_state.GetThreadPool(), session_state.GetInterOpThreadPool());
       subgraph_session_state->SetProfiler(session_profiler_);
       subgraph_session_state->SetLogger(*session_logger_);
       // Pass data transfer manager to subgraph.
@@ -722,8 +725,7 @@ common::Status InferenceSession::InitializeSubgraphSessions(Graph& graph, Sessio
                                           *subgraph_session_state, execution_providers_, kernel_registry_manager_);
 
       const auto implicit_inputs = node.ImplicitInputDefs();
-      ORT_RETURN_IF_ERROR_SESSIONID_(initializer.CreatePlan(&node, &implicit_inputs,
-                                                            session_options_.execution_mode));
+      ORT_RETURN_IF_ERROR_SESSIONID_(initializer.CreatePlan(&node, &implicit_inputs, session_options_.execution_mode));
       // LOGS(*session_logger_, VERBOSE) << std::make_pair(subgraph_info.session_state->GetExecutionPlan(),
       //                                                   &*subgraph_info.session_state);
 
@@ -731,7 +733,8 @@ common::Status InferenceSession::InitializeSubgraphSessions(Graph& graph, Sessio
       auto* p_op_kernel = session_state.GetMutableKernel(node.Index());
       ORT_ENFORCE(p_op_kernel);
       auto& control_flow_kernel = dynamic_cast<controlflow::IControlFlowKernel&>(*p_op_kernel);
-      ORT_RETURN_IF_ERROR_SESSIONID_(control_flow_kernel.SetupSubgraphExecutionInfo(session_state, name, *subgraph_session_state));
+      ORT_RETURN_IF_ERROR_SESSIONID_(
+          control_flow_kernel.SetupSubgraphExecutionInfo(session_state, name, *subgraph_session_state));
 
       // recurse
       ORT_RETURN_IF_ERROR_SESSIONID_(InitializeSubgraphSessions(subgraph, *subgraph_session_state));
@@ -845,10 +848,8 @@ common::Status InferenceSession::Initialize() {
     ORT_RETURN_IF_ERROR_SESSIONID_(CreateSubgraphSessionState(graph, *session_state_));
 
     // apply any transformations to the main graph and any subgraphs
-    ORT_RETURN_IF_ERROR_SESSIONID_(TransformGraph(graph, *graph_transformation_mgr_,
-                                                  execution_providers_, kernel_registry_manager_,
-                                                  insert_cast_transformer_,
-                                                  *session_state_));
+    ORT_RETURN_IF_ERROR_SESSIONID_(TransformGraph(graph, *graph_transformation_mgr_, execution_providers_,
+                                                  kernel_registry_manager_, insert_cast_transformer_, *session_state_));
 
     // now that all the transforms are done, call Resolve on the main graph. this will recurse into the subgraphs.
     ORT_RETURN_IF_ERROR_SESSIONID_(graph.Resolve());
@@ -870,6 +871,7 @@ common::Status InferenceSession::Initialize() {
     // handle any subgraphs
     ORT_RETURN_IF_ERROR_SESSIONID_(InitializeSubgraphSessions(graph, *session_state_));
     is_inited_ = true;
+
     // and log telemetry
     bool model_has_fp16_inputs = ModelHasFP16Inputs(graph);
     env.GetTelemetryProvider().LogSessionCreation(session_id_, model_->IrVersion(), model_->ProducerName(), model_->ProducerVersion(),
@@ -896,7 +898,6 @@ common::Status InferenceSession::Initialize() {
                         "NodeNameMapping",  // Event Name that should uniquely identify your event.
                         TraceLoggingValue(content.c_str(), "op_name"));
     }
-
 #endif
     LOGS(*session_logger_, INFO) << "Session successfully initialized.";
   } catch (const NotImplementedException& ex) {
@@ -916,20 +917,15 @@ common::Status InferenceSession::Initialize() {
   return status;
 }
 
-int InferenceSession::GetCurrentNumRuns() const {
-  return current_num_runs_.load();
-}
+int InferenceSession::GetCurrentNumRuns() const { return current_num_runs_.load(); }
 
 const std::vector<std::string>& InferenceSession::GetRegisteredProviderTypes() const {
   return execution_providers_.GetIds();
 }
 
-const SessionOptions& InferenceSession::GetSessionOptions() const {
-  return session_options_;
-}
+const SessionOptions& InferenceSession::GetSessionOptions() const { return session_options_; }
 
-common::Status InferenceSession::CheckShapes(const std::string& input_name,
-                                             const TensorShape& input_shape,
+common::Status InferenceSession::CheckShapes(const std::string& input_name, const TensorShape& input_shape,
                                              const TensorShape& expected_shape) const {
   auto input_shape_sz = input_shape.NumDimensions();
   auto expected_shape_sz = expected_shape.NumDimensions();
@@ -1087,7 +1083,8 @@ Status InferenceSession::Run(const RunOptions& run_options, const std::vector<st
     }
 
     // check the frequency to send Evalutaion Stop event
-    if (TimeDiffMicroSeconds(telemetry_.time_sent_last_evalutation_start_) > telemetry_.kDurationBetweenSendingEvaluationStart) {
+    if (TimeDiffMicroSeconds(telemetry_.time_sent_last_evalutation_start_) >
+        telemetry_.kDurationBetweenSendingEvaluationStart) {
       env.GetTelemetryProvider().LogEvaluationStart();
       // reset counters
       telemetry_.time_sent_last_evalutation_start_ = std::chrono::high_resolution_clock::now();
@@ -1129,10 +1126,8 @@ Status InferenceSession::Run(const RunOptions& run_options, const std::vector<st
     }
 
     // execute the graph
-    ORT_CHECK_AND_SET_RETVAL(
-        utils::ExecuteGraph(*session_state_, feeds_fetches_manager, feeds, *p_fetches,
-                            session_options_.execution_mode,
-                            run_options.terminate, run_logger));
+    ORT_CHECK_AND_SET_RETVAL(utils::ExecuteGraph(*session_state_, feeds_fetches_manager, feeds, *p_fetches,
+                                                 session_options_.execution_mode, run_options.terminate, run_logger));
 
   } catch (const std::exception& e) {
     retval = Status(common::ONNXRUNTIME, common::FAIL, e.what());
@@ -1155,7 +1150,8 @@ Status InferenceSession::Run(const RunOptions& run_options, const std::vector<st
   // time to send telemetry?
   if (TimeDiffMicroSeconds(telemetry_.time_sent_last_) > telemetry_.kDurationBetweenSending) {
     // send the telemetry
-    env.GetTelemetryProvider().LogRuntimePerf(session_id_, telemetry_.total_runs_since_last_, telemetry_.total_run_duration_since_last_);
+    env.GetTelemetryProvider().LogRuntimePerf(session_id_, telemetry_.total_runs_since_last_,
+                                              telemetry_.total_run_duration_since_last_);
     // reset counters
     telemetry_.time_sent_last_ = std::chrono::high_resolution_clock::now();
     telemetry_.total_runs_since_last_ = 0;
@@ -1242,8 +1238,7 @@ std::pair<common::Status, const OutputDefList*> InferenceSession::GetModelOutput
     std::lock_guard<onnxruntime::OrtMutex> l(session_mutex_);
     if (!is_model_loaded_) {
       LOGS(*session_logger_, ERROR) << "Model was not loaded";
-      return std::make_pair(common::Status(common::ONNXRUNTIME, common::FAIL, "Model was not loaded."),
-                            nullptr);
+      return std::make_pair(common::Status(common::ONNXRUNTIME, common::FAIL, "Model was not loaded."), nullptr);
     }
   }
 
@@ -1267,8 +1262,8 @@ common::Status InferenceSession::NewIOBinding(std::unique_ptr<IOBinding>* io_bin
 common::Status InferenceSession::Run(const RunOptions& run_options, IOBinding& io_binding) {
   // TODO should Run() call io_binding.SynchronizeInputs() or should it let the callers do it?
   // io_binding.SynchronizeInputs();
-  return Run(run_options, io_binding.GetInputNames(), io_binding.GetInputs(),
-             io_binding.GetOutputNames(), &io_binding.GetOutputs());
+  return Run(run_options, io_binding.GetInputNames(), io_binding.GetInputs(), io_binding.GetOutputNames(),
+             &io_binding.GetOutputs());
 }
 
 common::Status InferenceSession::Run(IOBinding& io_binding) {
@@ -1283,14 +1278,10 @@ void InferenceSession::StartProfiling(const std::basic_string<T>& file_prefix) {
   session_profiler_.StartProfiling(ss.str());
 }
 
-void InferenceSession::StartProfiling(const std::string& file_prefix) {
-  StartProfiling<char>(file_prefix);
-}
+void InferenceSession::StartProfiling(const std::string& file_prefix) { StartProfiling<char>(file_prefix); }
 
 #ifdef _WIN32
-void InferenceSession::StartProfiling(const std::wstring& file_prefix) {
-  StartProfiling<PATH_CHAR_TYPE>(file_prefix);
-}
+void InferenceSession::StartProfiling(const std::wstring& file_prefix) { StartProfiling<PATH_CHAR_TYPE>(file_prefix); }
 #endif
 
 void InferenceSession::StartProfiling(const logging::Logger* logger_ptr) {
@@ -1441,7 +1432,8 @@ void InferenceSession::AddPredefinedTransformers(GraphTransformerManager& transf
                                                  const std::vector<std::string>& custom_list) {
   auto add_transformers = [&](TransformerLevel level) {
     // Generate and register transformers for level
-    auto transformers_to_register = optimizer_utils::GenerateTransformers(level, session_options_.free_dimension_overrides, custom_list);
+    auto transformers_to_register =
+        optimizer_utils::GenerateTransformers(level, session_options_.free_dimension_overrides, custom_list);
     for (auto& entry : transformers_to_register) {
       transformer_manager.Register(std::move(entry), level);
     }
@@ -1463,7 +1455,7 @@ common::Status InferenceSession::WaitForNotification(Notification* p_executor_do
   if (timeout_in_ms > 0) {
     ORT_NOT_IMPLEMENTED(__FUNCTION__, "timeout_in_ms >0 is not supported");  // TODO
   }
-  p_executor_done->WaitForNotification();
+  p_executor_done->Wait();
 
   return Status::OK();
 }

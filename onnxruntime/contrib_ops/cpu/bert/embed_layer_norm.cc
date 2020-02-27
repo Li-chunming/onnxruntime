@@ -77,7 +77,7 @@ Status EmbedLayerNorm<T>::Compute(OpKernelContext* context) const {
     std::atomic_bool failed{false};
 
     int n = batch_size * sequence_length;
-    concurrency::ThreadPool::TryBatchParallelFor(context->GetOperatorThreadPool(), n, [=, &failed](int index) {
+    concurrency::ThreadPool::TryBatchParallelFor(context->GetOperatorThreadPool(), n, [=, &failed](ptrdiff_t index) {
       int word_col_index = input_ids_data[index];
       if (word_col_index < 0 || word_col_index >= word_embedding_length) {
         failed.store(true, std::memory_order_release);

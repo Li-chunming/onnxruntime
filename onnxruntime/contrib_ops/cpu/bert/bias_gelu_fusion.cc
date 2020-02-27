@@ -54,7 +54,7 @@ Status BiasGelu<T>::Compute(OpKernelContext* ctx) const {
 
   concurrency::ThreadPool::TryBatchParallelFor(ctx->GetOperatorThreadPool(),
                                                static_cast<int32_t>(task_count),
-                                               [&](int32_t task_idx) {
+                                               [&](ptrdiff_t task_idx) {
                                                  const T* p_input = X_data + task_idx * bias_len;
                                                  T* p_output = Y_data + task_idx * bias_len;
                                                  T* p_output_tmp = tmp_data + task_idx * bias_len;

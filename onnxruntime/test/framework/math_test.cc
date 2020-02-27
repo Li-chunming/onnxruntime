@@ -20,6 +20,7 @@
 #include "core/platform/threadpool.h"
 #include "core/util/math_cpuonly.h"
 namespace onnxruntime {
+using concurrency::ThreadOptions;
 
 #define VECTOR_HEAD(x) x.size() > 0 ? &x[0] : NULL
 
@@ -29,7 +30,7 @@ class MathGemmTest : public testing::TestWithParam<int> {
   static concurrency::ThreadPool* CreateThreadPool(int size) {
     if (size == 1)
       return nullptr;
-    return new concurrency::ThreadPool("test", size);
+    return new concurrency::ThreadPool(&onnxruntime::Env::Default(), ThreadOptions(), "", size, true);
   }
   std::unique_ptr<concurrency::ThreadPool> tp{CreateThreadPool(GetParam())};
 };

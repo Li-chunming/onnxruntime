@@ -96,7 +96,7 @@ Status SkipLayerNorm<T>::Compute(OpKernelContext* p_ctx) const {
 
   concurrency::ThreadPool::TryBatchParallelFor(p_ctx->GetOperatorThreadPool(),
                                                static_cast<int32_t>(task_count),
-                                               [&](int32_t task_idx) {
+                                               [&](ptrdiff_t task_idx) {
                                                  const T* p_input = input_data + task_idx * hidden_size;
                                                  const T* p_skip = skip_data + task_idx * hidden_size;
                                                  T* p_output = output_data + task_idx * hidden_size;
